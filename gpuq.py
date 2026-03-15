@@ -860,6 +860,71 @@ def cmd_recover(args):
         print("No jobs re-queued.")
 
 
+def _gpu_processes() -> list:
+    """Get list of (pid, mem_mb) for GPU compute processes. Empty list if nvidia-smi unavailable."""
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return []
+        procs = []
+        for line in result.stdout.strip().splitlines():
+            parts = line.strip().split(",")
+            if len(parts) == 2:
+                procs.append((int(parts[0].strip()), float(parts[1].strip())))
+        return procs
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+        return []
+
+
+def _wait_gpu_free(timeout=120):
+    """Wait until no other processes are using the GPU.
+
+    Only blocks if nvidia-smi reports GPU processes owned by other PIDs.
+    Skips entirely if nvidia-smi is unavailable or GPUQ_NO_GPU_WAIT is set.
+    """
+    if os.environ.get("GPUQ_NO_GPU_WAIT"):
+        return
+    my_pid = os.getpid()
+    for i in range(timeout):
+        procs = _gpu_processes()
+        if not procs:
+            return  # nvidia-smi unavailable or no GPU processes
+        # Filter out processes launched by this gpuq run (children)
+        try:
+            my_pgid = os.getpgid(my_pid)
+        except OSError:
+            my_pgid = my_pid
+        others = []
+        for pid, mem in procs:
+            try:
+                pgid = os.getpgid(pid)
+            except OSError:
+                pgid = pid
+            if pgid != my_pgid and pid != my_pid:
+                others.append((pid, mem))
+        if not others:
+            if i > 0:
+                print(f"    GPU is free. Proceeding.")
+            return
+        if i == 0:
+            total_mb = sum(m for _, m in others)
+            pids = [p for p, _ in others]
+            print(f"    Waiting for GPU to free ({total_mb:.0f}MB used by PIDs {pids})...")
+        time.sleep(2)
+        if (i + 1) % 15 == 0:
+            others_now = [(p, m) for p, m in _gpu_processes() if p != my_pid]
+            total_mb = sum(m for _, m in others_now) if others_now else 0
+            print(f"    Still waiting... {total_mb:.0f}MB in use ({(i+1)*2}s)")
+    procs = _gpu_processes()
+    others = [(pid, mem) for pid, mem in procs if pid != my_pid]
+    if others:
+        total_mb = sum(m for _, m in others)
+        print(f"    WARNING: GPU still has {total_mb:.0f}MB in use after {timeout*2}s. Proceeding anyway.")
+
+
 def cmd_run(args):
     if args.daemon:
         daemon_log = STATE_DIR / "daemon.log"
@@ -930,7 +995,15 @@ def cmd_run(args):
                 break
 
         db.close()
+
+        # Wait for GPU to be free before launching next job
+        _wait_gpu_free()
+
         _run_job(runnable)
+
+        # Brief wait for GPU memory to release after job exits
+        time.sleep(3)
+        _wait_gpu_free(timeout=30)
 
     _notify_done()
     db = _get_db()

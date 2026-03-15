@@ -17,10 +17,11 @@ DB_FILE = STATE_DIR / "gpuq.db"
 
 def gpuq(*args, check=True, input_text=None):
     """Run gpuq CLI and return stdout."""
+    env = {**os.environ, "GPUQ_NO_GPU_WAIT": "1"}
     result = subprocess.run(
         [sys.executable, GPUQ, *args],
         capture_output=True, text=True, timeout=60,
-        input=input_text,
+        input=input_text, env=env,
     )
     if check and result.returncode != 0:
         raise RuntimeError(f"gpuq {' '.join(args)} failed:\n{result.stdout}\n{result.stderr}")
@@ -279,9 +280,10 @@ def test_pid_tracking():
     gpuq("add", "--dir", DUMMY_DIR, "--name", "pid-track", "dummy_job.py", "--job-name", "slow", "--duration", "5")
 
     # Run in background
+    env = {**os.environ, "GPUQ_NO_GPU_WAIT": "1"}
     proc = subprocess.Popen(
         [sys.executable, GPUQ, "run"],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
     )
     # Wait a moment for the job to start
     time.sleep(2)
