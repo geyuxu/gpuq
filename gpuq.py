@@ -460,7 +460,7 @@ def cmd_status(args):
 
     symbols = {
         "pending": "⏳", "running": "🔄", "done": "✅",
-        "failed": "❌", "cancelled": "🚫", "interrupted": "⚡",
+        "failed": "❌", "cancelled": "🚫", "interrupted": "⚡", "preempted": "⏸️",
     }
 
     print(f"{'ID':>3}  {'St':>2}  {'Name':<30} {'Script':<25} {'Time':>8}  {'Info'}")
@@ -571,6 +571,183 @@ def _parse_eta_seconds(eta_str: str) -> float:
     return total
 
 
+def cmd_preempt(args):
+    """Gracefully stop a running job so GPU can be used for something else.
+
+    Sends SIGTERM → waits for checkpoint save → marks as 'preempted'.
+    The job can later be resumed with `gpuq resume`.
+    """
+    db = _get_db()
+    job = db.execute("SELECT * FROM jobs WHERE id = ?", (args.job_id,)).fetchone()
+    if not job:
+        print(f"Job #{args.job_id} not found.")
+        db.close()
+        return
+    if job["status"] != "running":
+        print(f"Job #{args.job_id} is {job['status']}, can only preempt running jobs.")
+        db.close()
+        return
+    if not job["pid"] or not _pid_alive(job["pid"]):
+        print(f"Job #{args.job_id} has no live process.")
+        db.close()
+        return
+
+    pid = job["pid"]
+    timeout = args.timeout
+
+    print(f"Sending SIGTERM to PID {pid} (Job #{args.job_id}: {job['name']})...")
+    print(f"Waiting up to {timeout}s for graceful shutdown (checkpoint save)...")
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError as e:
+        print(f"Failed to send SIGTERM: {e}")
+        db.close()
+        return
+
+    # Wait for process to exit
+    for i in range(timeout):
+        if not _pid_alive(pid):
+            break
+        time.sleep(1)
+        if (i + 1) % 10 == 0:
+            print(f"  Still waiting... {i+1}s")
+    else:
+        if _pid_alive(pid):
+            if args.force:
+                print(f"Timeout. Sending SIGKILL...")
+                os.kill(pid, signal.SIGKILL)
+                time.sleep(1)
+            else:
+                print(f"Timeout after {timeout}s. Process still running. Use --force to SIGKILL.")
+                db.close()
+                return
+
+    # Find latest checkpoint
+    j = _job_dict(job)
+    checkpoint = _find_latest_checkpoint(j)
+
+    db.execute("""
+        UPDATE jobs SET status = 'preempted', finished_at = ?, pid = NULL
+        WHERE id = ?
+    """, (datetime.now().isoformat(), args.job_id))
+    db.commit()
+    db.close()
+
+    print(f"Job #{args.job_id} preempted.")
+    if checkpoint:
+        print(f"  Latest checkpoint: {checkpoint}")
+    print(f"  Use `gpuq resume {args.job_id}` to continue later.")
+
+
+def cmd_resume(args):
+    """Resume a preempted/interrupted job from its latest checkpoint."""
+    db = _get_db()
+    job = db.execute("SELECT * FROM jobs WHERE id = ?", (args.job_id,)).fetchone()
+    if not job:
+        print(f"Job #{args.job_id} not found.")
+        db.close()
+        return
+    if job["status"] not in ("preempted", "interrupted"):
+        print(f"Job #{args.job_id} is {job['status']}, can only resume preempted/interrupted jobs.")
+        db.close()
+        return
+
+    j = _job_dict(job)
+    checkpoint = _find_latest_checkpoint(j)
+
+    if not checkpoint:
+        print(f"No checkpoint found for Job #{args.job_id}.")
+        print("Re-queuing from scratch.")
+        db.execute("""
+            UPDATE jobs SET status = 'pending', pid = NULL,
+                            started_at = NULL, finished_at = NULL
+            WHERE id = ?
+        """, (args.job_id,))
+        db.commit()
+        db.close()
+        print(f"Job #{args.job_id} re-queued. Run `gpuq run` to execute.")
+        return
+
+    # Build resumed args: inject --resume_from_checkpoint
+    new_args = list(j["args"])
+    # Remove existing resume flags if present
+    resume_flags = ("--resume_from_checkpoint", "--resume-from-checkpoint")
+    filtered = []
+    skip_next = False
+    for a in new_args:
+        if skip_next:
+            skip_next = False
+            continue
+        if a in resume_flags:
+            skip_next = True
+            continue
+        filtered.append(a)
+    filtered.extend(["--resume_from_checkpoint", checkpoint])
+
+    now = datetime.now().isoformat()
+    name = j["name"]
+    if not name.endswith("(resumed)"):
+        name = f"{name} (resumed)"
+
+    # Create a new job that continues from checkpoint
+    cur = db.execute("""
+        INSERT INTO jobs (name, script, args, python, cwd, env, status,
+                          after_job, retries, attempt, added_at, log_file)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending', NULL, 0, 0, ?, ?)
+    """, (
+        name, j["script"], json.dumps(filtered), j["python"], j["cwd"],
+        json.dumps(j["env"]), now, "",
+    ))
+    new_id = cur.lastrowid
+    log_file = str(LOG_DIR / f"job_{new_id:03d}_{Path(j['script']).stem}.log")
+    db.execute("UPDATE jobs SET log_file = ? WHERE id = ?", (log_file, new_id))
+    db.commit()
+    db.close()
+
+    print(f"[+] Job #{new_id}: {name}")
+    print(f"    Resuming from: {checkpoint}")
+    print(f"    Run `gpuq run` to execute.")
+
+
+def _find_latest_checkpoint(job: dict) -> str:
+    """Find the latest checkpoint directory for a job."""
+    args = job.get("args", [])
+    if isinstance(args, str):
+        args = json.loads(args)
+    cwd = job["cwd"]
+
+    # Find output_dir from args
+    output_dir = None
+    for i, a in enumerate(args):
+        if a in ("--output_dir", "--output-dir") and i + 1 < len(args):
+            output_dir = args[i + 1]
+            break
+
+    if output_dir:
+        scan_dir = Path(cwd) / output_dir if not Path(output_dir).is_absolute() else Path(output_dir)
+    else:
+        scan_dir = Path(cwd)
+
+    if not scan_dir.exists():
+        return ""
+
+    # Find checkpoint-{step} dirs, return the one with highest step
+    best_step = -1
+    best_path = ""
+    for d in scan_dir.glob("checkpoint-*"):
+        if d.is_dir():
+            try:
+                step = int(d.name.split("-")[-1])
+                if step > best_step:
+                    best_step = step
+                    best_path = str(d)
+            except ValueError:
+                pass
+
+    return best_path
+
+
 def cmd_cancel(args):
     db = _get_db()
     job = db.execute("SELECT * FROM jobs WHERE id = ?", (args.job_id,)).fetchone()
@@ -590,7 +767,7 @@ def cmd_cancel(args):
 
 def cmd_clear(args):
     db = _get_db()
-    cur = db.execute("DELETE FROM jobs WHERE status IN ('done', 'failed', 'cancelled')")
+    cur = db.execute("DELETE FROM jobs WHERE status IN ('done', 'failed', 'cancelled', 'preempted')")
     db.commit()
     cleared = cur.rowcount
     remaining = db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
@@ -860,6 +1037,16 @@ def main():
     p_eta = sub.add_parser("eta", help="Show ETA for running jobs")
     p_eta.add_argument("job_id", type=int, nargs="?", default=None, help="Job ID (default: all running)")
 
+    # preempt
+    p_preempt = sub.add_parser("preempt", help="Gracefully stop a running job for later resume")
+    p_preempt.add_argument("job_id", type=int, help="Job ID to preempt")
+    p_preempt.add_argument("--timeout", type=int, default=60, help="Seconds to wait for graceful exit (default: 60)")
+    p_preempt.add_argument("--force", action="store_true", help="SIGKILL if timeout")
+
+    # resume
+    p_resume = sub.add_parser("resume", help="Resume a preempted job from checkpoint")
+    p_resume.add_argument("job_id", type=int, help="Job ID to resume")
+
     # cancel
     p_cancel = sub.add_parser("cancel", help="Cancel pending job")
     p_cancel.add_argument("job_id", type=int)
@@ -889,6 +1076,10 @@ def main():
         cmd_log(args)
     elif args.command == "eta":
         cmd_eta(args)
+    elif args.command == "preempt":
+        cmd_preempt(args)
+    elif args.command == "resume":
+        cmd_resume(args)
     elif args.command == "cancel":
         cmd_cancel(args)
     elif args.command == "clear":

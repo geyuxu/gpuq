@@ -19,6 +19,9 @@ Manage the GPU experiment queue via `gpuq` CLI. Interpret the user's natural lan
 | "哪些任务中断了" | `gpuq recover` (shows interrupted jobs) |
 | "还要多久" / "ETA" / "预计完成时间" | `gpuq eta` or `gpuq eta <id>` |
 | "第1个任务的进度" | `gpuq eta 1` |
+| "暂停/让出GPU" / "preempt" | `gpuq preempt <id>` (SIGTERM, waits for checkpoint) |
+| "恢复之前暂停的" / "resume" | `gpuq resume <id>` (creates new job from checkpoint) |
+| "先跑紧急任务再恢复" | preempt current → add urgent → run → resume preempted |
 
 ## Behavior
 
@@ -47,6 +50,10 @@ gpuq adopt <pid>         Adopt a running process into the queue
 
 gpuq status              Show all jobs (auto-detects dead processes, shows ETA)
 gpuq eta [id]            Detailed ETA for running jobs (progress, est. finish time)
+gpuq preempt <id>        Gracefully stop job for later resume (SIGTERM → checkpoint)
+  --timeout N            Wait N seconds for exit (default: 60)
+  --force                SIGKILL if timeout
+gpuq resume <id>         Resume preempted job from latest checkpoint
 gpuq run [--daemon]      Execute the queue
 gpuq log <id> [-n N]     Show job log (default 30 lines)
 gpuq cancel <id>         Cancel a pending job
