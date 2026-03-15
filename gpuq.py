@@ -144,7 +144,7 @@ def _pid_alive(pid: int) -> bool:
 
 def _read_proc_info(pid: int) -> dict:
     """Read process info from /proc (Linux)."""
-    info = {"pid": pid, "cmdline": None, "cwd": None, "name": None}
+    info = {"pid": pid, "cmdline": None, "cwd": None, "name": None, "started_at": None}
     proc = Path(f"/proc/{pid}")
     if not proc.exists():
         return info
@@ -160,6 +160,20 @@ def _read_proc_info(pid: int) -> dict:
     try:
         info["name"] = (proc / "comm").read_text().strip()
     except OSError:
+        pass
+    # Read real start time from /proc/pid/stat
+    try:
+        stat_data = (proc / "stat").read_text()
+        # Field 22 (0-indexed after comm) is starttime in clock ticks
+        fields = stat_data.split(")")[-1].split()
+        starttime_ticks = int(fields[19])
+        clk_tck = os.sysconf("SC_CLK_TCK")
+        with open("/proc/uptime") as f:
+            uptime = float(f.read().split()[0])
+        boot_time = time.time() - uptime
+        start_epoch = boot_time + starttime_ticks / clk_tck
+        info["started_at"] = datetime.fromtimestamp(start_epoch).isoformat()
+    except (OSError, IndexError, ValueError):
         pass
     return info
 
@@ -392,6 +406,7 @@ def cmd_adopt(args):
 
     python_path = parts[0] if parts else "python3"
     now = datetime.now().isoformat()
+    started_at = info.get("started_at") or now
     log_file = str(LOG_DIR / f"job_adopted_{pid}_{Path(script).stem}.log")
 
     db = _get_db()
@@ -400,7 +415,7 @@ def cmd_adopt(args):
                           retries, attempt, pid, added_at, started_at, log_file)
         VALUES (?, ?, ?, ?, ?, '{}', 'running', 0, 1, ?, ?, ?, ?)
     """, (name, script, json.dumps(script_args), python_path, cwd,
-          pid, now, now, log_file))
+          pid, now, started_at, log_file))
     job_id = cur.lastrowid
     # Update log_file with actual ID
     log_file = str(LOG_DIR / f"job_{job_id:03d}_{Path(script).stem}.log")
