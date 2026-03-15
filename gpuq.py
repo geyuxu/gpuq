@@ -451,11 +451,29 @@ def cmd_status(args):
             """, (datetime.now().isoformat(), r["id"]))
     db.commit()
 
-    jobs = db.execute("SELECT * FROM jobs ORDER BY id").fetchall()
+    # Filter by status
+    done_statuses = ("done", "failed", "cancelled", "preempted")
+    if args.done:
+        jobs = db.execute(
+            f"SELECT * FROM jobs WHERE status IN ({','.join('?' * len(done_statuses))}) ORDER BY id",
+            done_statuses
+        ).fetchall()
+    elif args.all:
+        jobs = db.execute("SELECT * FROM jobs ORDER BY id").fetchall()
+    else:
+        jobs = db.execute(
+            f"SELECT * FROM jobs WHERE status NOT IN ({','.join('?' * len(done_statuses))}) ORDER BY id",
+            done_statuses
+        ).fetchall()
     db.close()
 
     if not jobs:
-        print("Queue is empty.")
+        if args.done:
+            print("No completed jobs.")
+        elif args.all:
+            print("Queue is empty.")
+        else:
+            print("No active jobs. Use --all to see completed jobs.")
         return
 
     symbols = {
@@ -1038,7 +1056,9 @@ def main():
     p_adopt.add_argument("--name", default=None, help="Job name for display")
 
     # status
-    sub.add_parser("status", help="Show queue")
+    p_status = sub.add_parser("status", help="Show queue")
+    p_status.add_argument("-a", "--all", action="store_true", help="Show all jobs including completed")
+    p_status.add_argument("--done", action="store_true", help="Show only completed/failed jobs")
 
     # log
     p_log = sub.add_parser("log", help="Show job log")

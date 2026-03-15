@@ -71,7 +71,7 @@ def test_add_and_status():
     assert jobs[0]["status"] == "pending"
     assert jobs[1]["status"] == "pending"
 
-    out = gpuq("status")
+    out = gpuq("status", "-a")
     assert "t1" in out
     assert "t2" in out
     print("PASS: test_add_and_status")
@@ -208,7 +208,7 @@ def test_adopt():
         assert jobs[0]["name"] == "my-adopted"
 
         # Status should show it as running
-        out = gpuq("status")
+        out = gpuq("status", "-a")
         assert "🔄" in out
         assert "my-adopted" in out
     finally:
@@ -216,7 +216,7 @@ def test_adopt():
         proc.wait()
 
     # After kill, status should detect it as interrupted
-    out = gpuq("status")
+    out = gpuq("status", "-a")
     assert "⚡" in out
     jobs = get_jobs()
     assert jobs[0]["status"] == "interrupted"
@@ -333,7 +333,7 @@ def test_json_migration():
     json_file.write_text(json.dumps(json_state))
 
     # Running any command should trigger migration
-    out = gpuq("status")
+    out = gpuq("status", "-a")
     assert "old-job-1" in out
     assert "old-job-2" in out
 
