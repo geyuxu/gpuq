@@ -270,24 +270,34 @@ def _eta_from_checkpoints(job, elapsed: float) -> dict:
     args = json.loads(job["args"]) if isinstance(job["args"], str) else job["args"]
     cwd = job["cwd"]
 
-    # Find max_steps from args
+    # Find max_steps and output_dir from args
     max_steps = None
+    output_dir = None
     for i, a in enumerate(args):
         if a in ("--max_steps", "--max-steps", "--num_train_steps") and i + 1 < len(args):
             try:
                 max_steps = int(args[i + 1])
             except ValueError:
                 pass
-            break
+        if a in ("--output_dir", "--output-dir") and i + 1 < len(args):
+            output_dir = args[i + 1]
 
     if not max_steps:
         return {}
 
-    # Scan for checkpoint directories or completion files
+    # Determine scan directory: output_dir (relative to cwd) > cwd
+    if output_dir:
+        scan_dir = Path(cwd) / output_dir if not Path(output_dir).is_absolute() else Path(output_dir)
+    else:
+        scan_dir = Path(cwd)
+
+    if not scan_dir.exists():
+        return {}
+
     current_step = 0
 
-    # HuggingFace style: checkpoint-{step}
-    for d in Path(cwd).rglob("checkpoint-*"):
+    # HuggingFace style: checkpoint-{step} (only direct children to avoid stale nested ones)
+    for d in scan_dir.glob("checkpoint-*"):
         if d.is_dir():
             try:
                 step = int(d.name.split("-")[-1])
@@ -295,13 +305,14 @@ def _eta_from_checkpoints(job, elapsed: float) -> dict:
             except ValueError:
                 pass
 
-    # Completion files: completions_{step:05d}.parquet
-    for f in Path(cwd).rglob("completions_*.parquet"):
-        try:
-            step = int(f.stem.split("_")[-1])
-            current_step = max(current_step, step)
-        except ValueError:
-            pass
+    # Completion files: completions_{step:05d}.parquet (in completions/ subdir or directly)
+    for pattern in ["completions/completions_*.parquet", "completions_*.parquet"]:
+        for f in scan_dir.glob(pattern):
+            try:
+                step = int(f.stem.split("_")[-1])
+                current_step = max(current_step, step)
+            except ValueError:
+                pass
 
     if current_step > 0 and current_step <= max_steps:
         pct = current_step / max_steps * 100
