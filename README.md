@@ -61,19 +61,21 @@ gpuq cancel 3       # cancel a pending job
 gpuq clear          # remove finished jobs
 ```
 
-## Claude Code Integration
+## AI Assistant Integration
 
-gpuq ships with a [Claude Code](https://claude.ai/claude-code) slash command skill. Once registered, you can manage the queue via `/gpuq` using natural language — no need to remember CLI syntax.
+gpuq ships with an AI skill file (`ai-skill/gpuq.md`) that lets AI coding assistants manage the queue via natural language — no need to remember CLI syntax.
+
+### Claude Code
 
 ```bash
-# Register the skill
-ln -sf $(pwd)/claude-skill/gpuq.md ~/.claude/commands/gpuq.md
+ln -sf $(pwd)/ai-skill/gpuq.md ~/.claude/commands/gpuq.md
 ```
 
-Then in Claude Code:
-- `/gpuq check the queue`
-- `/gpuq run train.py in my-project`
-- `/gpuq run train first, then eval`
+Then use `/gpuq check the queue`, `/gpuq run train.py in my-project`, etc.
+
+### Other AI tools
+
+Copy or symlink `ai-skill/gpuq.md` into your tool's custom command/skill directory.
 
 ## How It Works
 

@@ -61,19 +61,21 @@ gpuq cancel 3       # 取消等待中的任务
 gpuq clear          # 清理已完成的任务
 ```
 
-## Claude Code 集成
+## AI 助手集成
 
-gpuq 自带 [Claude Code](https://claude.ai/claude-code) slash command skill。注册后可以用自然语言通过 `/gpuq` 管理队列，不需要记任何参数。
+gpuq 自带 AI skill 文件（`ai-skill/gpuq.md`），让 AI 编程助手可以用自然语言管理队列，不需要记任何参数。
+
+### Claude Code
 
 ```bash
-# 注册 skill
-ln -sf $(pwd)/claude-skill/gpuq.md ~/.claude/commands/gpuq.md
+ln -sf $(pwd)/ai-skill/gpuq.md ~/.claude/commands/gpuq.md
 ```
 
-注册后在 Claude Code 中直接说：
-- `/gpuq 看看队列`
-- `/gpuq 跑一下 train.py`
-- `/gpuq 先跑 train 再跑 eval`
+然后直接说：`/gpuq 看看队列`、`/gpuq 跑一下 train.py`、`/gpuq 先跑 train 再跑 eval`
+
+### 其他 AI 工具
+
+将 `ai-skill/gpuq.md` 复制或软链接到对应工具的自定义命令目录即可。
 
 ## 工作原理
 
