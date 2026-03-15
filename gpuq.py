@@ -865,11 +865,23 @@ def cmd_run(args):
         adopted_running = db.execute(
             "SELECT id, pid, name FROM jobs WHERE status = 'running' AND pid IS NOT NULL"
         ).fetchall()
+        has_running = False
         for ar in adopted_running:
             if ar["pid"] and _pid_alive(ar["pid"]):
-                db.close()
-                time.sleep(5)
-                continue
+                has_running = True
+                break
+            else:
+                # Adopted process died — mark as done (exit code unknown)
+                db.execute("""
+                    UPDATE jobs SET status = 'done', finished_at = ?, pid = NULL
+                    WHERE id = ? AND status = 'running'
+                """, (datetime.now().isoformat(), ar["id"]))
+                db.commit()
+                print(f"    Job #{ar['id']} ({ar['name']}): adopted process finished.")
+        if has_running:
+            db.close()
+            time.sleep(5)
+            continue
 
         pending = db.execute(
             "SELECT * FROM jobs WHERE status = 'pending' ORDER BY id"
