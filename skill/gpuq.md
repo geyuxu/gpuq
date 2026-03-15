@@ -17,6 +17,8 @@ Manage the GPU experiment queue via `gpuq` CLI. Interpret the user's natural lan
 | "把正在跑的进程管起来" | `nvidia-smi` find PID → `gpuq adopt <pid> --name <name>` |
 | "重启后恢复任务" | `gpuq recover --all` or `gpuq recover --jobs 1 3` |
 | "哪些任务中断了" | `gpuq recover` (shows interrupted jobs) |
+| "还要多久" / "ETA" / "预计完成时间" | `gpuq eta` or `gpuq eta <id>` |
+| "第1个任务的进度" | `gpuq eta 1` |
 
 ## Behavior
 
@@ -43,7 +45,8 @@ gpuq add <script> [script_args...]   Add a job
 gpuq adopt <pid>         Adopt a running process into the queue
   --name NAME            Display name
 
-gpuq status              Show all jobs (auto-detects dead processes)
+gpuq status              Show all jobs (auto-detects dead processes, shows ETA)
+gpuq eta [id]            Detailed ETA for running jobs (progress, est. finish time)
 gpuq run [--daemon]      Execute the queue
 gpuq log <id> [-n N]     Show job log (default 30 lines)
 gpuq cancel <id>         Cancel a pending job

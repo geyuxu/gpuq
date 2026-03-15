@@ -16,12 +16,13 @@ A lightweight single-GPU job scheduler that:
 import argparse
 import json
 import os
+import re
 import signal
 import sqlite3
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # ── Config ──────────────────────────────────────────────────
@@ -163,6 +164,159 @@ def _read_proc_info(pid: int) -> dict:
     return info
 
 
+# ── ETA estimation ──────────────────────────────────────────
+# Patterns to extract progress from log output (current, total)
+_PROGRESS_PATTERNS = [
+    # trl/transformers: " Step 50/300 " or "step 50/300"
+    re.compile(r'[Ss]tep\s+(\d+)\s*/\s*(\d+)'),
+    # "[50/300]" — common in tqdm and training loops
+    re.compile(r'\[(\d+)/(\d+)\]'),
+    # "Epoch 2/10" or "epoch 2/10"
+    re.compile(r'[Ee]poch\s+(\d+)\s*/\s*(\d+)'),
+    # "Progress: 50%" or "50.0%"
+    re.compile(r'(\d+(?:\.\d+)?)\s*%'),
+    # "iteration 50 of 300"
+    re.compile(r'[Ii]teration\s+(\d+)\s+of\s+(\d+)'),
+]
+
+
+def _estimate_eta(job) -> dict:
+    """Estimate ETA for a running job.
+
+    Returns dict with keys: current, total, pct, eta_str, method
+    Returns empty dict if no estimate possible.
+    """
+    if job["status"] != "running" or not job["started_at"]:
+        return {}
+
+    started = datetime.fromisoformat(job["started_at"])
+    elapsed = (datetime.now() - started).total_seconds()
+    if elapsed < 1:
+        return {}
+
+    # Method 1: Parse log file for progress patterns
+    result = _eta_from_log(job, elapsed)
+    if result:
+        return result
+
+    # Method 2: Parse cmdline args for --max_steps and scan checkpoints
+    result = _eta_from_checkpoints(job, elapsed)
+    if result:
+        return result
+
+    return {}
+
+
+def _eta_from_log(job, elapsed: float) -> dict:
+    """Extract progress from job log file."""
+    log_path = Path(job["log_file"]) if job["log_file"] else None
+    if not log_path or not log_path.exists():
+        return {}
+
+    # Read last 200 lines for efficiency
+    try:
+        lines = log_path.read_text().splitlines()[-200:]
+    except OSError:
+        return {}
+
+    # Search backwards for the latest progress match
+    for line in reversed(lines):
+        for pat in _PROGRESS_PATTERNS:
+            m = pat.search(line)
+            if not m:
+                continue
+            groups = m.groups()
+            if len(groups) == 1:
+                # Percentage pattern
+                pct = float(groups[0])
+                if 0 < pct <= 100:
+                    remaining = elapsed * (100 - pct) / pct if pct > 0 else 0
+                    return {
+                        "pct": pct,
+                        "eta_str": _fmt_duration(remaining),
+                        "method": "log-%",
+                    }
+            elif len(groups) == 2:
+                current, total = int(groups[0]), int(groups[1])
+                if 0 < current <= total and total > 1:
+                    pct = current / total * 100
+                    remaining = elapsed * (total - current) / current
+                    return {
+                        "current": current, "total": total,
+                        "pct": pct,
+                        "eta_str": _fmt_duration(remaining),
+                        "method": "log",
+                    }
+
+    return {}
+
+
+def _eta_from_checkpoints(job, elapsed: float) -> dict:
+    """Estimate progress from checkpoint files and --max_steps in args."""
+    args = json.loads(job["args"]) if isinstance(job["args"], str) else job["args"]
+    cwd = job["cwd"]
+
+    # Find max_steps from args
+    max_steps = None
+    for i, a in enumerate(args):
+        if a in ("--max_steps", "--max-steps", "--num_train_steps") and i + 1 < len(args):
+            try:
+                max_steps = int(args[i + 1])
+            except ValueError:
+                pass
+            break
+
+    if not max_steps:
+        return {}
+
+    # Scan for checkpoint directories or completion files
+    current_step = 0
+
+    # HuggingFace style: checkpoint-{step}
+    for d in Path(cwd).rglob("checkpoint-*"):
+        if d.is_dir():
+            try:
+                step = int(d.name.split("-")[-1])
+                current_step = max(current_step, step)
+            except ValueError:
+                pass
+
+    # Completion files: completions_{step:05d}.parquet
+    for f in Path(cwd).rglob("completions_*.parquet"):
+        try:
+            step = int(f.stem.split("_")[-1])
+            current_step = max(current_step, step)
+        except ValueError:
+            pass
+
+    if current_step > 0 and current_step <= max_steps:
+        pct = current_step / max_steps * 100
+        remaining = elapsed * (max_steps - current_step) / current_step
+        return {
+            "current": current_step, "total": max_steps,
+            "pct": pct,
+            "eta_str": _fmt_duration(remaining),
+            "method": "checkpoint",
+        }
+
+    return {}
+
+
+def _fmt_duration(seconds: float) -> str:
+    """Format seconds into human readable duration."""
+    if seconds < 0:
+        return "?"
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    elif seconds < 3600:
+        return f"{seconds // 60}m{seconds % 60:02d}s"
+    else:
+        h = seconds // 3600
+        m = (seconds % 3600) // 60
+        return f"{h}h{m:02d}m"
+
+
 # ── Commands ────────────────────────────────────────────────
 def cmd_add(args):
     db = _get_db()
@@ -294,7 +448,7 @@ def cmd_status(args):
             t0 = datetime.fromisoformat(j["started_at"])
             t1 = datetime.fromisoformat(end_time)
             secs = (t1 - t0).total_seconds()
-            elapsed = f"{int(secs//60)}m{int(secs%60):02d}s"
+            elapsed = _fmt_duration(secs)
 
         info_parts = []
         if j["after_job"]:
@@ -305,6 +459,13 @@ def cmd_status(args):
             info_parts.append(f"exit={j['exit_code']}")
         if j["attempt"] > 1:
             info_parts.append(f"attempt={j['attempt']}")
+
+        # ETA for running jobs
+        if j["status"] == "running":
+            eta = _estimate_eta(j)
+            if eta:
+                info_parts.append(f"{eta['pct']:.0f}% ETA {eta['eta_str']}")
+
         info = " ".join(info_parts)
 
         name = j["name"] or "?"
@@ -333,6 +494,55 @@ def cmd_log(args):
     lines = log_path.read_text().splitlines()
     for line in lines[-n:]:
         print(line)
+
+
+def cmd_eta(args):
+    """Show detailed ETA for a running job."""
+    db = _get_db()
+    if args.job_id:
+        jobs = db.execute("SELECT * FROM jobs WHERE id = ?", (args.job_id,)).fetchall()
+    else:
+        jobs = db.execute("SELECT * FROM jobs WHERE status = 'running' ORDER BY id").fetchall()
+    db.close()
+
+    if not jobs:
+        print("No running jobs." if not args.job_id else f"Job #{args.job_id} not found.")
+        return
+
+    for j in jobs:
+        if j["status"] != "running":
+            print(f"Job #{j['id']} is {j['status']}, not running.")
+            continue
+
+        started = datetime.fromisoformat(j["started_at"])
+        elapsed = (datetime.now() - started).total_seconds()
+        eta = _estimate_eta(j)
+
+        print(f"Job #{j['id']}: {j['name']}")
+        print(f"  Elapsed: {_fmt_duration(elapsed)}")
+
+        if eta:
+            if "current" in eta:
+                print(f"  Progress: {eta['current']}/{eta['total']} ({eta['pct']:.1f}%)")
+            else:
+                print(f"  Progress: {eta['pct']:.1f}%")
+            print(f"  ETA: {eta['eta_str']}")
+            finish_time = datetime.now() + timedelta(seconds=_parse_eta_seconds(eta['eta_str']))
+            print(f"  Est. finish: {finish_time.strftime('%H:%M:%S')}")
+            print(f"  Method: {eta['method']}")
+        else:
+            print("  Progress: unknown (no progress pattern detected in logs or checkpoints)")
+
+
+def _parse_eta_seconds(eta_str: str) -> float:
+    """Parse ETA string back to seconds."""
+    total = 0
+    m = re.match(r'(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?', eta_str)
+    if m:
+        if m.group(1): total += int(m.group(1)) * 3600
+        if m.group(2): total += int(m.group(2)) * 60
+        if m.group(3): total += int(m.group(3))
+    return total
 
 
 def cmd_cancel(args):
@@ -620,6 +830,10 @@ def main():
     p_log.add_argument("job_id", type=int)
     p_log.add_argument("-n", "--lines", type=int, default=30)
 
+    # eta
+    p_eta = sub.add_parser("eta", help="Show ETA for running jobs")
+    p_eta.add_argument("job_id", type=int, nargs="?", default=None, help="Job ID (default: all running)")
+
     # cancel
     p_cancel = sub.add_parser("cancel", help="Cancel pending job")
     p_cancel.add_argument("job_id", type=int)
@@ -647,6 +861,8 @@ def main():
         cmd_status(args)
     elif args.command == "log":
         cmd_log(args)
+    elif args.command == "eta":
+        cmd_eta(args)
     elif args.command == "cancel":
         cmd_cancel(args)
     elif args.command == "clear":
