@@ -15,10 +15,27 @@ A lightweight single-GPU job queue for running experiments sequentially.
 ## Install
 
 ```bash
+# Clone
+git clone git@github.com:geyuxu/gpuq.git
+cd gpuq
+
 # Symlink to PATH
 ln -sf $(pwd)/gpuq.py ~/.local/bin/gpuq
 chmod +x gpuq.py
 ```
+
+## Claude Code Skill
+
+gpuq 附带一个 [Claude Code](https://claude.ai/claude-code) slash command skill，让你可以在 Claude Code 中通过 `/gpuq` 来管理队列。
+
+注册方法：
+
+```bash
+# 将 skill 文件软链接到 Claude Code 的 commands 目录
+ln -sf $(pwd)/claude-skill/gpuq.md ~/.claude/commands/gpuq.md
+```
+
+注册后在 Claude Code 中使用 `/gpuq status`、`/gpuq add train.py --lr 1e-4` 等即可。
 
 ## Usage
 
