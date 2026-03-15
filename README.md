@@ -99,19 +99,19 @@ gpuq run --daemon
 
 ## AI Assistant Integration
 
-gpuq ships with an AI skill file (`ai-skill/gpuq.md`) that lets AI coding assistants manage the queue via natural language — no need to remember CLI syntax.
+gpuq ships with a skill file (`skill/gpuq.md`) that lets AI coding assistants manage the queue via natural language — no need to remember CLI syntax.
 
 ### Claude Code
 
 ```bash
-ln -sf $(pwd)/ai-skill/gpuq.md ~/.claude/commands/gpuq.md
+ln -sf $(pwd)/skill/gpuq.md ~/.claude/commands/gpuq.md
 ```
 
 Then use `/gpuq check the queue`, `/gpuq run train.py in my-project`, etc.
 
 ### Other AI tools
 
-Copy or symlink `ai-skill/gpuq.md` into your tool's custom command/skill directory.
+Copy or symlink `skill/gpuq.md` into your tool's custom command/skill directory.
 
 ## How It Works
 

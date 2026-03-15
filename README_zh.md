@@ -99,19 +99,19 @@ gpuq run --daemon
 
 ## AI 助手集成
 
-gpuq 自带 AI skill 文件（`ai-skill/gpuq.md`），让 AI 编程助手可以用自然语言管理队列，不需要记任何参数。
+gpuq 自带 skill 文件（`skill/gpuq.md`），让 AI 编程助手可以用自然语言管理队列，不需要记任何参数。
 
 ### Claude Code
 
 ```bash
-ln -sf $(pwd)/ai-skill/gpuq.md ~/.claude/commands/gpuq.md
+ln -sf $(pwd)/skill/gpuq.md ~/.claude/commands/gpuq.md
 ```
 
 然后直接说：`/gpuq 看看队列`、`/gpuq 跑一下 train.py`、`/gpuq 先跑 train 再跑 eval`
 
 ### 其他 AI 工具
 
-将 `ai-skill/gpuq.md` 复制或软链接到对应工具的自定义命令目录即可。
+将 `skill/gpuq.md` 复制或软链接到对应工具的自定义命令目录即可。
 
 ## 工作原理
 
